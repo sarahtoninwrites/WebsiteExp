@@ -6,29 +6,29 @@
     <title>Interactive Walker</title>
     <style>
         body {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
             margin: 0;
             background-color: #f0f2f5;
             font-family: sans-serif;
         }
         canvas {
+            display: block;
+            width: 100%;
+            max-width: 800px;
+            margin: 20px auto;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             border-radius: 8px;
-            cursor: crosshair;
+            cursor: pointer;
         }
         .instructions {
-            position: absolute;
-            top: 20px;
+            text-align: center;
             color: #555;
+            padding: 10px;
         }
     </style>
 </head>
 <body>
 
-<div class="instructions">Drag the blue blocks to stop the red walker.</div>
+<div class="instructions">Drag the shapes to block the character's path.</div>
 <canvas id="gameCanvas" width="800" height="400"></canvas>
 
 <script>
@@ -314,17 +314,33 @@ class World {
 
     // Handle Mouse Events
     initInput() {
-        // Helper to get mouse pos relative to canvas
-        const getMousePos = (e) => {
+        // Helper to get coordinates relative to the canvas, and scale them for responsiveness
+        const getCanvasCoordinates = (e) => {
             const rect = this.canvas.getBoundingClientRect();
+            const scaleX = this.canvas.width / rect.width;
+            const scaleY = this.canvas.height / rect.height;
+
+            let clientX, clientY;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            const canvasX = (clientX - rect.left) * scaleX;
+            const canvasY = (clientY - rect.top) * scaleY;
+
             return {
-                x: e.clientX - rect.left,
-                y: e.clientY - rect.top
+                x: canvasX,
+                y: canvasY
             };
         };
 
-        this.canvas.addEventListener('mousedown', (e) => {
-            const { x, y } = getMousePos(e);
+        const onDragStart = (e) => {
+            if (e.type === 'touchstart') e.preventDefault();
+            const { x, y } = getCanvasCoordinates(e);
             
             // Check if we clicked an obstacle (iterate backwards to grab top-most)
             for (let i = this.obstacles.length - 1; i >= 0; i--) {
@@ -337,22 +353,30 @@ class World {
                     return;
                 }
             }
-        });
+        };
 
-        this.canvas.addEventListener('mousemove', (e) => {
+        const onDragMove = (e) => {
+            if (e.type === 'touchmove') e.preventDefault();
             if (this.dragTarget) {
-                const { x, y } = getMousePos(e);
+                const { x, y } = getCanvasCoordinates(e);
                 this.dragTarget.x = x - this.dragTarget.dragOffsetX;
                 this.dragTarget.y = y - this.dragTarget.dragOffsetY;
             }
-        });
+        };
 
-        window.addEventListener('mouseup', () => {
+        const onDragEnd = () => {
             if (this.dragTarget) {
                 this.dragTarget.isDragging = false;
                 this.dragTarget = null;
             }
-        });
+        };
+
+        this.canvas.addEventListener('mousedown', onDragStart);
+        this.canvas.addEventListener('touchstart', onDragStart, { passive: false });
+        window.addEventListener('mousemove', onDragMove);
+        window.addEventListener('touchmove', onDragMove, { passive: false });
+        window.addEventListener('mouseup', onDragEnd);
+        window.addEventListener('touchend', onDragEnd);
     }
 
     update() {
