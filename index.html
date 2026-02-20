@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Walker</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+            font-family: sans-serif;
+        }
+        canvas {
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            cursor: crosshair;
+        }
+        .instructions {
+            position: absolute;
+            top: 20px;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+
+<div class="instructions">Drag the blue blocks to stop the red walker.</div>
+<canvas id="gameCanvas" width="800" height="400"></canvas>
+
+<script>
+/**
+ * Module: Utilities
+ * Simple AABB (Axis-Aligned Bounding Box) collision detection.
+ */
+function checkCollision(rect1, rect2) {
+    return (
+        rect1.x < rect2.x + rect2.w &&
+        rect1.x + rect1.w > rect2.x &&
+        rect1.y < rect2.y + rect2.h &&
+        rect1.y + rect1.h > rect2.y
+    );
+}
+
+/**
+ * Module: Obstacle
+ * Represents the movable blocks.
+ */
+class Obstacle {
+    constructor(x, y, w, h, imageSrc) {
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = h;
+        this.image = new Image();
+        this.image.src = imageSrc;
+        this.isDragging = false;
+        this.dragOffsetX = 0;
+        this.dragOffsetY = 0;
+    }
+
+    draw(ctx) {
+        ctx.drawImage(this.image, this.x, this.y, this.w, this.h);
+        
+        if (this.isDragging) {
+            ctx.strokeStyle = '#4a90e2';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(this.x, this.y, this.w, this.h);
+        }
+    }
+
+    // Check if a point (mouse click) is inside this obstacle
+    contains(mx, my) {
+        return (mx >= this.x && mx <= this.x + this.w && my >= this.y && my <= this.y + this.h);
+    }
+
+    getType() {
+        if (this.image.src.includes('triangle')) return 'triangle';
+        if (this.image.src.includes('trapezium')) return 'trapezium';
+        return 'square';
+    }
+
+    getSurfaceY(worldX) {
+        const type = this.getType();
+        const localX = worldX - this.x;
+
+        if (localX < 0 || localX > this.w) return null;
+
+        if (type === 'square') {
+            return this.y;
+        } else if (type === 'triangle') {
+            const mid = this.w / 2;
+            if (localX < mid) {
+                // Going up
+                return (this.y + this.h) - (this.h * (localX / mid));
+            } else {
+                // Going down
+                return this.y + (this.h * ((localX - mid) / mid));
+            }
+        } else if (type === 'trapezium') {
+            const slopeW = this.w * 0.25; 
+            if (localX < slopeW) {
+                return (this.y + this.h) - (this.h * (localX / slopeW));
+            } else if (localX > this.w - slopeW) {
+                return (this.y + this.h) - (this.h * ((this.w - localX) / slopeW));
+            } else {
+                return this.y;
+            }
+        }
+        return this.y;
+    }
+}
+
+/**
+ * Module: Platform
+ * Represents a static, non-movable part of the map.
+ */
+class Platform {
+    constructor(x, y, w, h, color = '#FFFFFF') {
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = h;
+        this.color = color;
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+    }
+}
+
+/**
+ * Module: Character
+ * Represents the walking entity.
+ */
+class Character {
+    constructor(canvasWidth, canvasHeight) {
+        this.w = 60;
+        this.h = 60;
+        this.x = 0; // Start at left
+        this.y = canvasHeight / 2 - this.h / 2; // Start at middle left
+        this.baseSpeed = 2;
+        this.canvasWidth = canvasWidth;
+        this.canvasHeight = canvasHeight;
+        this.blocked = false;
+
+        // Physics properties
+        this.velocityY = 0;
+        this.gravity = 0.5;
+        this.onGround = false;
+        this.blockedTime = 0; // in seconds
+        this.jumpForce = -12; // negative value for upward velocity
+        this.rotation = 0;
+
+        this.image = new Image();
+        this.image.src = 'Character.png';
+    }
+
+    update(obstacles, platforms) {
+        // 1. HORIZONTAL MOVEMENT & COLLISION (with movable obstacles)
+        this.blocked = false;
+        this.rotation = 0; // Reset rotation each frame
+        const nextX = this.x + this.baseSpeed;
+        const horizontalPredictionRect = { x: nextX, y: this.y, w: this.w, h: this.h };
+        let onSlope = false;
+
+        for (const obs of obstacles) {
+            if (checkCollision(horizontalPredictionRect, obs)) {
+                const type = obs.getType();
+                if (type === 'square') {
+                    // Only block if we are hitting the side (not walking on top)
+                    if (this.y + this.h > obs.y + 10) {
+                        this.blocked = true;
+                    }
+                } else {
+                    // Slope logic
+                    const footX = nextX + this.w / 2;
+                    const surfaceY = obs.getSurfaceY(footX);
+                    if (surfaceY !== null) {
+                        this.y = surfaceY - this.h;
+                        this.velocityY = 0;
+                        this.onGround = true;
+                        onSlope = true;
+
+                        // Calculate slope angle for rotation
+                        const nextFootX = footX + 1;
+                        const nextSurfaceY = obs.getSurfaceY(nextFootX);
+                        if (nextSurfaceY !== null) {
+                            this.rotation = Math.atan2(nextSurfaceY - surfaceY, nextFootX - footX);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (this.blocked) {
+            // Assuming 60fps, each frame is approx 1/60s.
+            this.blockedTime += 1 / 60;
+        } else {
+            let currentSpeed = this.baseSpeed;
+            if (onSlope) {
+                // Move slightly slower on slopes to feel more natural
+                currentSpeed *= 0.50;
+            }
+            this.x += currentSpeed; //keep moving
+            this.blockedTime = 0; // Reset if not blocked
+        }
+
+        // Auto-jump if blocked for too long while on the ground
+        if (this.blockedTime > 0.5 && this.onGround) {
+            this.velocityY = this.jumpForce;
+            this.onGround = false;
+            this.blockedTime = 0; // Reset after jumping to prevent continuous jumps
+        }
+
+        // Wrap around screen horizontally
+        if (this.x > this.canvasWidth) {
+            this.x = -this.w;
+            this.y = this.canvasHeight / 2 - this.h / 2;
+            this.velocityY = 0;
+        }
+
+        // 2. VERTICAL MOVEMENT & COLLISION (with platforms/floor)
+        if (!onSlope) {
+            const prevY = this.y;
+            this.velocityY += this.gravity;
+            this.y += this.velocityY;
+            this.onGround = false;
+
+            const allSurfaces = [...platforms, ...obstacles];
+            for (const surface of allSurfaces) {
+                // Check for landing collision
+                if (this.velocityY > 0 && (this.x + this.w > surface.x && this.x < surface.x + surface.w) && (prevY + this.h <= surface.y) && (this.y + this.h >= surface.y)) {
+                    
+                    // Don't land on the bounding box air of slopes
+                    let isSolidTop = true;
+                    if (surface instanceof Obstacle && surface.getType() !== 'square') isSolidTop = false;
+
+                    if (isSolidTop) {
+                        this.y = surface.y - this.h; 
+                        this.velocityY = 0;
+                        this.onGround = true;
+                        break; 
+                    }
+                }
+            }
+        }
+    }
+
+    draw(ctx) {
+        ctx.save();
+        const centerX = this.x + this.w / 2;
+        const centerY = this.y + this.h / 2;
+        ctx.translate(centerX, centerY);
+        ctx.rotate(this.rotation);
+
+        if (this.blocked) {
+            ctx.globalAlpha = 0.6;
+        }
+        // Draw the image centered on the new (rotated) origin
+        ctx.drawImage(this.image, -this.w / 2, -this.h / 2, this.w, this.h);
+        
+        ctx.restore();
+    }
+}
+
+/**
+ * Module: World
+ * Main Game Controller
+ */
+class World {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        
+        this.background = new Image();
+        this.background.src = 'Background.png';
+        
+        this.character = new Character(this.canvas.width, this.canvas.height);
+        
+        // Movable objects
+        this.obstacles = [];
+        this.addObstacle(300, 260, 80, 80, 'square.png');
+        this.addObstacle(500, 280, 80, 60, 'triangle.png');
+        this.addObstacle(650, 290, 100, 50, 'trapezium.png');
+
+        // Static map elements (platforms)
+        this.platforms = [];
+        this.addPlatform(0, 340, 800, 60); // Main floor
+        this.addPlatform(200, 250, 150, 20);
+        this.addPlatform(450, 180, 200, 20);
+        
+        // Input State
+        this.dragTarget = null;
+
+        this.initInput();
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+    }
+
+    addObstacle(x, y, w, h, imageSrc) {
+        this.obstacles.push(new Obstacle(x, y, w, h, imageSrc));
+
+
+    }
+
+    addPlatform(x, y, w, h) {
+        this.platforms.push(new Platform(x, y, w, h));
+    }
+
+    // Handle Mouse Events
+    initInput() {
+        // Helper to get mouse pos relative to canvas
+        const getMousePos = (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            return {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top
+            };
+        };
+
+        this.canvas.addEventListener('mousedown', (e) => {
+            const { x, y } = getMousePos(e);
+            
+            // Check if we clicked an obstacle (iterate backwards to grab top-most)
+            for (let i = this.obstacles.length - 1; i >= 0; i--) {
+                const obs = this.obstacles[i];
+                if (obs.contains(x, y)) {
+                    this.dragTarget = obs;
+                    obs.isDragging = true;
+                    obs.dragOffsetX = x - obs.x;
+                    obs.dragOffsetY = y - obs.y;
+                    return;
+                }
+            }
+        });
+
+        this.canvas.addEventListener('mousemove', (e) => {
+            if (this.dragTarget) {
+                const { x, y } = getMousePos(e);
+                this.dragTarget.x = x - this.dragTarget.dragOffsetX;
+                this.dragTarget.y = y - this.dragTarget.dragOffsetY;
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (this.dragTarget) {
+                this.dragTarget.isDragging = false;
+                this.dragTarget = null;
+            }
+        });
+    }
+
+    update() {
+        this.character.update(this.obstacles, this.platforms);
+    }
+
+    draw() {
+        // Clear screen
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+        // Draw background
+        this.ctx.drawImage(this.background, 0, 0, this.canvas.width, this.canvas.height);
+
+        // Draw Platforms (map)
+        this.platforms.forEach(p => p.draw(this.ctx));
+
+        // Draw Obstacles
+        this.obstacles.forEach(obs => obs.draw(this.ctx));
+
+        // Draw Character
+        this.character.draw(this.ctx);
+    }
+
+    loop() {
+        this.update();
+        this.draw();
+        requestAnimationFrame(this.loop);
+    }
+}
+
+// Start the project
+const app = new World('gameCanvas');
+
+</script>
+</body>
+</html>
