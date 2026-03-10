@@ -50,13 +50,16 @@ function checkCollision(rect1, rect2) {
  * Represents the movable blocks.
  */
 class Obstacle {
-    constructor(x, y, w, h, imageSrc) {
+    constructor(x, y, w, h, imageSrc, options = {}) {
         this.x = x;
         this.y = y;
         this.w = w;
         this.h = h;
         this.image = new Image();
         this.image.src = imageSrc;
+
+        // For shapes like trapeziums, defines the percentage of width for the slope
+        this.slopePercent = options.slopePercent || 0.25;
         this.isDragging = false;
         this.dragOffsetX = 0;
         this.dragOffsetY = 0;
@@ -101,7 +104,7 @@ class Obstacle {
                 return this.y + (this.h * ((localX - mid) / mid));
             }
         } else if (type === 'trapezium') {
-            const slopeW = this.w * 0.25; 
+            const slopeW = this.w * this.slopePercent; 
             if (localX < slopeW) {
                 return (this.y + this.h) - (this.h * (localX / slopeW));
             } else if (localX > this.w - slopeW) {
@@ -157,7 +160,17 @@ class Character {
         this.rotation = 0;
 
         this.image = new Image();
-        this.image.src = 'Character.png';
+        this.image.src = 'Banner Walk Cycle/TMC_WC_0000.png';
+
+        this.walkFrames = [];
+        for (let i = 0; i <= 7; i++) {
+            const img = new Image();
+            img.src = `Banner Walk Cycle/TMC_WC_000${i}.png`;
+            this.walkFrames.push(img);
+        }
+        this.frameIndex = 0;
+        this.tickCount = 0;
+        this.fps = 8; // Manually set animation FPS
     }
 
     update(obstacles, platforms) {
@@ -165,7 +178,8 @@ class Character {
         this.blocked = false;
         this.rotation = 0; // Reset rotation each frame
         const nextX = this.x + this.baseSpeed;
-        const horizontalPredictionRect = { x: nextX, y: this.y, w: this.w, h: this.h };
+        // Expand height slightly to ensure we detect the surface even when hovering (due to -12 offset)
+        const horizontalPredictionRect = { x: nextX, y: this.y, w: this.w, h: this.h + 14 };
         let onSlope = false;
 
         for (const obs of obstacles) {
@@ -177,21 +191,40 @@ class Character {
                         this.blocked = true;
                     }
                 } else {
+                    // Skip slope logic if we are jumping (moving up)
+                    if (this.velocityY < 0) continue;
+
                     // Slope logic
-                    const footX = nextX + this.w / 2;
-                    const surfaceY = obs.getSurfaceY(footX);
+                    // Simplified tracing logic:
+                    // Just track the center point of the character against the shape's surface
+                    const centerX = this.x + this.w / 2;
+                    let surfaceY = obs.getSurfaceY(centerX);
+
+                    // If center is slightly off but AABB collides, clamp to edges to keep tracing
+                    if (surfaceY === null) {
+                        if (centerX < obs.x) surfaceY = obs.getSurfaceY(obs.x);
+                        else if (centerX > obs.x + obs.w) surfaceY = obs.getSurfaceY(obs.x + obs.w);
+                    }
+
                     if (surfaceY !== null) {
-                        this.y = surfaceY - this.h;
+                        // Calculate slope angle for light tilting
+                        const delta = 5;
+                        let yPrev = obs.getSurfaceY(centerX - delta);
+                        let yNext = obs.getSurfaceY(centerX + delta);
+                        if (yPrev === null) yPrev = surfaceY;
+                        if (yNext === null) yNext = surfaceY;
+
+                        // Check if the surface is flat to apply conditional lift
+                        const isFlat = Math.abs(yNext - yPrev) < 0.1;
+                        const lift = isFlat ? 0 : 10; // Add a 10px lift only on slopes
+
+                        this.y = surfaceY - this.h - lift; // Apply lift
                         this.velocityY = 0;
                         this.onGround = true;
                         onSlope = true;
 
-                        // Calculate slope angle for rotation
-                        const nextFootX = footX + 1;
-                        const nextSurfaceY = obs.getSurfaceY(nextFootX);
-                        if (nextSurfaceY !== null) {
-                            this.rotation = Math.atan2(nextSurfaceY - surfaceY, nextFootX - footX);
-                        }
+                        // Apply very light tilt (0.2 factor)
+                        this.rotation = Math.atan2(yNext - yPrev, delta * 2) * 0.2;
                     }
                 }
             }
@@ -204,7 +237,7 @@ class Character {
             let currentSpeed = this.baseSpeed;
             if (onSlope) {
                 // Move slightly slower on slopes to feel more natural
-                currentSpeed *= 0.50;
+                currentSpeed *= 0.3;
             }
             this.x += currentSpeed; //keep moving
             this.blockedTime = 0; // Reset if not blocked
@@ -235,12 +268,33 @@ class Character {
             for (const surface of allSurfaces) {
                 // Check for landing collision
                 if (this.velocityY > 0 && (this.x + this.w > surface.x && this.x < surface.x + surface.w) && (prevY + this.h <= surface.y) && (this.y + this.h >= surface.y)) {
-                    
-                    // Don't land on the bounding box air of slopes
-                    let isSolidTop = true;
-                    if (surface instanceof Obstacle && surface.getType() !== 'square') isSolidTop = false;
+                    if (surface instanceof Obstacle && surface.getType() !== 'square') {
+                        // For slopes, we need a more precise check to see if we're landing on the surface itself.
+                        const footX = this.x + this.w / 2;
+                        const surfaceY = surface.getSurfaceY(footX);
+                        // Check if our feet are actually crossing the slope's surface line
+                        if (surfaceY !== null && this.y + this.h >= surfaceY) {
+                            // Calculate slope angle for light tilting on landing
+                            const delta = 5;
+                            let yPrev = surface.getSurfaceY(footX - delta);
+                            let yNext = surface.getSurfaceY(footX + delta);
+                            if (yPrev === null) yPrev = surfaceY;
+                            if (yNext === null) yNext = surfaceY;
 
-                    if (isSolidTop) {
+                            // Check if the surface is flat to apply conditional lift
+                            const isFlat = Math.abs(yNext - yPrev) < 0.1;
+                            const lift = isFlat ? 0 : 10; // Add a 10px lift only on slopes
+
+                            this.y = surfaceY - this.h - lift; // Snap to surface with lift
+                            this.velocityY = 0;
+                            this.onGround = true;
+                            this.rotation = Math.atan2(yNext - yPrev, delta * 2) * 0.2;
+
+                            break;
+                        }
+                        // If not, we're in the "air" of the bounding box, so we continue to the next surface.
+                    } else {
+                        // For platforms and square obstacles, a simple bounding box collision is enough.
                         this.y = surface.y - this.h; 
                         this.velocityY = 0;
                         this.onGround = true;
@@ -248,6 +302,18 @@ class Character {
                     }
                 }
             }
+        }
+
+        // Simple Animation Cycle
+        if (!this.blocked && this.onGround) {
+            this.tickCount++;
+            if (this.tickCount > (60 / this.fps)) { // Adjust speed based on target FPS
+                this.tickCount = 0;
+                this.frameIndex = (this.frameIndex + 1) % this.walkFrames.length;
+                this.image = this.walkFrames[this.frameIndex];
+            }
+        } else {
+            this.image = this.walkFrames[0]; // Idle frame
         }
     }
 
@@ -258,9 +324,6 @@ class Character {
         ctx.translate(centerX, centerY);
         ctx.rotate(this.rotation);
 
-        if (this.blocked) {
-            ctx.globalAlpha = 0.6;
-        }
         // Draw the image centered on the new (rotated) origin
         ctx.drawImage(this.image, -this.w / 2, -this.h / 2, this.w, this.h);
         
@@ -284,9 +347,9 @@ class World {
         
         // Movable objects
         this.obstacles = [];
-        this.addObstacle(300, 260, 80, 80, 'square.png');
-        this.addObstacle(500, 280, 80, 60, 'triangle.png');
-        this.addObstacle(650, 290, 100, 50, 'trapezium.png');
+        this.addObstacle(300, 260, 80, 80, 'square.png'); // Default square
+        this.addObstacle(500, 280, 80, 60, 'triangle.png'); // Default triangle
+        this.addObstacle(650, 290, 100, 50, 'trapezium.png', { slopePercent: 0.35 }); // Trapezium with a gentler slope
 
         // Static map elements (platforms)
         this.platforms = [];
@@ -302,8 +365,8 @@ class World {
         requestAnimationFrame(this.loop);
     }
 
-    addObstacle(x, y, w, h, imageSrc) {
-        this.obstacles.push(new Obstacle(x, y, w, h, imageSrc));
+    addObstacle(x, y, w, h, imageSrc, options) {
+        this.obstacles.push(new Obstacle(x, y, w, h, imageSrc, options));
 
 
     }
@@ -390,14 +453,13 @@ class World {
         // Draw background
         this.ctx.drawImage(this.background, 0, 0, this.canvas.width, this.canvas.height);
 
+        // Draw the character first, so it appears behind the platforms and obstacles.
+        this.character.draw(this.ctx);
+
         // Draw Platforms (map)
         this.platforms.forEach(p => p.draw(this.ctx));
 
-        // Draw Obstacles
         this.obstacles.forEach(obs => obs.draw(this.ctx));
-
-        // Draw Character
-        this.character.draw(this.ctx);
     }
 
     loop() {
